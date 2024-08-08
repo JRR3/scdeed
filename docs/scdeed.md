@@ -1,0 +1,4 @@
+ 
+# scdeed module
+
+::: scdeed.scdeed
