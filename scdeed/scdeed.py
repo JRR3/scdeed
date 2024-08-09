@@ -11,7 +11,9 @@
 #Questions? Email me at: javier.ruizramirez@uhn.ca
 #########################################################
 import os
+import seaborn as sb
 import scanpy as sc
+import scipy.sparse as sp
 import numpy as np
 import pandas as pd
 import matplotlib as mpl
@@ -34,6 +36,9 @@ class scDEED:
             output: Optional[str] = "",
             input_is_matrix_market: Optional[bool] = False,
             n_pcs: Optional[int] = 2,
+            use_highly_variable: Optional[bool] = False,
+            use_full_matrix: Optional[bool] = False,
+            frac_neighbors: Optional[float] = 0.25,
             ):
         """
         The constructor takes the following inputs.
@@ -90,6 +95,68 @@ class scDEED:
         else:
             raise ValueError('Unexpected input type.')
 
+        self.is_sparse = sp.issparse(self.A.X)
+
+        #Name for the original expression matrix layer
+        self.ori = "original"
+        #Name for the permuted expression matrix layer
+        self.per = "permuted"
+
+        if self.is_sparse:
+            #Compute the density of the matrix
+            rho = self.A.X.nnz / np.prod(self.A.X.shape)
+            #If more than 50% of the matrix is occupied,
+            #we generate a dense version of the matrix.
+
+            #sparse_threshold = 0.50
+            sparse_threshold = 1
+            if use_full_matrix or sparse_threshold < rho:
+                self.is_sparse = False
+                X = self.A.X.toarray()
+                txt = ("Using a dense representation" 
+                       " of the count matrix.")
+                print(txt)
+                txt = ("Values will be converted to" 
+                       " float32.")
+                print(txt)
+                X = X.astype(np.float32)
+            else:
+                self.is_sparse = True
+                #Make sure we use a CSC format.
+                X = sp.csc_matrix(self.A.X,
+                                  dtype=np.float32,
+                                  copy=True)
+
+
+        else:
+            #The matrix is dense.
+            print("The matrix is dense.")
+            self.is_sparse = False
+            X = self.A.X.copy()
+            txt = ("Values will be converted to" 
+                   " float32.")
+            print(txt)
+            X = X.astype(np.float32)
+
+
+        if use_highly_variable:
+
+            hv = "highly_variable"
+            if hv in self.A.var:
+                X = X[:, self.A.var[hv]]
+            else:
+                sc.pp.highly_variable_genes(
+                    self.A,
+                    flavor="seurat")
+                #Note that when the flavor is seurat,
+                #the assumption is that the data have been
+                #previously log-normalized.
+                X = X[:, self.A.var[hv]]
+
+        n_cells = X.shape[0]
+        self.A.layers[self.ori] = X
+
+
         #If no output directory is provided,
         #we use the current working directory.
         if output == "":
@@ -104,23 +171,70 @@ class scDEED:
 
         self.n_pcs = n_pcs
 
+        n_neighbors = frac_neighbors * n_cells
+        self.n_neighbors = np.int32(n_neighbors)
+
+    #=================================
+    def permute_expression_matrix(self,
+                                  source_layer: str,
+                                  target_layer: str):
+        """
+        This function permutes the entries of 
+        each column/gene.
+        """
+
+        X = self.A.layers[source_layer].copy()
+
+        if not self.is_sparse:
+            #Matrix is full.
+            X = np.random.permutation(X)
+
+        else:
+            #Matrix is sparse.
+            #Note that the matrix has the CSC format 
+            #by design. This allows us to work directly
+            #on the data structure of the matrix.
+            n_genes = X.shape[1]
+            for k in range(n_genes):
+                col = X.getcol(k)
+                p_col = np.random.permutation(col.data)
+                start = X.indptr[k]
+                end = X.indptr[k+1]
+                X.data[start:end] = p_col
+        
+        self.A.layers[target_layer] = X
+
+    #=================================
+    def compute_spaces_for_layer(self,
+                                 layer: str,
+                                 ):
+        pca_tag = f"X_pca_{layer}"
+        embd_tag= f"X_embd_{layer}"
+        self.compute_pca(layer=layer,
+                         tag = pca_tag,)
+        self.compute_tsne(use_rep=pca_tag,
+                          tag = embd_tag,)
+
+
     #=================================
     def compute_pca(self,
+                    layer: str,
                     tag: str,
                     ):
-        sc.pp.pca(self.A,
-                  n_comps=self.n_pcs,
-                  use_highly_variable=False,
-                  svd_solver="auto",
+
+        self.A.obsm[tag] = sc.pp.pca(
+            self.A.layers[layer],
+            n_comps=self.n_pcs,
+            svd_solver="auto",
         )
 
-        self.A.obsm[tag] = self.A.obsm["X_pca"].copy()
 
     #=================================
     def plot_embedding(self,
                  tag: str,
                  color_column: str,
                  color_map: Union[str, dict],
+                 modifier: Optional[str] = "sc",
                  ):
         """
         Plot the first two columns of the embedding.
@@ -136,7 +250,7 @@ class scDEED:
             ticks=True,
         )
         ax.set_aspect("equal")
-        fname = f"{tag}.pdf"
+        fname = f"{tag}_{modifier}.pdf"
         fname = os.path.join(self.output, fname)
         fig.savefig(fname, bbox_inches="tight")
 
@@ -152,12 +266,163 @@ class scDEED:
                    use_rep=use_rep)
 
         self.A.obsm[tag] = self.A.obsm["X_tsne"].copy()
+
+    #=================================
+    def compute_null_distribution(self):
+        mtx = self.A.obsm["X_pca"]
+        p_mtx = self.permute_each_column(mtx)
+
+    #=================================
+    def plot_spaces_for_layer(
+            self,
+            layer: str,
+            color_column: Optional[str] = "colors",
+            color_map: Optional[str] = "plasma",
+    ):
+        """
+        Plot the pre-embedding space (projected onto R^2) 
+        and the embedding space.
+        """
+        pca_tag = f"X_pca_{layer}"
+        embd_tag = f"X_embd_{layer}"
+
+        self.plot_embedding(pca_tag, color_column, color_map)
+        self.plot_embedding(embd_tag, color_column, color_map)
+
+    #=================================
+    def compute_proximity_objects_for_layer(self,
+                                            layer: str,
+                                            ):
+        """
+        This function defines the matrix objects
+        that we use to construct the correlations.
+        Two types of matrices are produces.
+        One is the matrix of neighbors and the 
+        second is the matrix of distances.
+        The matrix of neighbors is computed using
+        the NearestNeighbors function from sklearn.
+        The matrix of distances is computed using
+        the pairwise function from sklearn.
+        """
+        pca_mtx = f"X_pca_{layer}"
+        embd_mtx = f"X_embd_{layer}"
+
+        pca_ngb = f"pca_ngb_{layer}"
+        embd_ngb = f"embd_ngb_{layer}"
+        embd_dist = f"embd_dist_{layer}"
+        embd_sort_dist = f"embd_sort_dist_{layer}"
+
+        pca_nn_obj = NearestNeighbors(
+            n_neighbors=self.n_neighbors,
+            algorithm="ball_tree",
+            ).fit(self.A.obsm[pca_mtx])
+
+        embd_nn_obj = NearestNeighbors(
+            n_neighbors=self.n_neighbors,
+            algorithm="ball_tree",
+            ).fit(self.A.obsm[embd_mtx])
+
+        self.A.obsm[pca_ngb] = pca_nn_obj.kneighbors(
+            return_distance=False)
+
+        (self.A.obsm[embd_sort_dist],
+         self.A.obsm[embd_ngb]) = embd_nn_obj.kneighbors()
+
+        self.A.obsm[embd_dist] = pairwise_distances(
+            self.A.obsm[embd_mtx], metric="euclidean")
+
+    #=================================
+    def correlation_function(self,
+                      embedding_dist_vec,
+                      embedding_sorted_dist_vec,
+                      pre_embedding_order,
+                      ):
+        """
+        This function takes three arguments.
+        All the vectors refer to one cell "C".
+        (1) The distances between C and the other cells.
+        (2) The sorted version of (1).
+        (3) The nearest neighbors for C in the
+        pre-embedding space.
+        """
+        a = embedding_dist_vec[pre_embedding_order]
+        #b = embedding_dist_vec[embedding_order]
+        b = embedding_sorted_dist_vec
+        m = np.corrcoef(a,b)
+
+        return m[0,1]
+
+    #=================================
+    def compute_correlations_for_layer(self,
+                                       layer: str):
+
+        pca_ngb = f"pca_ngb_{layer}"
+        embd_ngb = f"embd_ngb_{layer}"
+        embd_sort_dist = f"embd_sort_dist_{layer}"
+        embd_dist = f"embd_dist_{layer}"
+
+        pca_ngb_mtx = self.A.obsm[pca_ngb]
+        #embd_ngb_mtx = self.A.obsm[embd_ngb]
+        embd_sort_dist_mtx = self.A.obsm[embd_sort_dist]
+        embd_dist_mtx = self.A.obsm[embd_dist]
+
+        Z = zip(embd_dist_mtx,
+                embd_sort_dist_mtx,
+                pca_ngb_mtx)
+
+        with Pool(processes=6) as pool:
+            C = pool.starmap(self.correlation_function, Z)
+        
+        print(describe(C))
+
+        corr_tag = f"corr_{layer}"
+        self.A.obs[corr_tag] = C
+
+
+    #=================================
+    def plot_distribution_for_layer(self,
+                                       layer: str):
+        corr_tag = f"corr_{layer}"
+        fig, ax = plt.subplots()
+        xlabel = f"Correlation ({layer} cells)"
+        scprep.plot.histogram(self.A.obs[corr_tag],
+                              xlabel=xlabel,
+                              ylabel="# of cells",
+                              ax = ax,
+                              )
+
+        fname = f"distribution_{layer}.pdf"
+        fname = os.path.join(self.output, fname)
+        fig.savefig(fname, bbox_inches="tight")
+
+
     #=================================
     def run(self):
-        self.compute_pca("X_pca_O")
-        self.plot_embedding("X_pca_O", "colors", "plasma")
-        self.compute_tsne("X_pca_O","X_tsne_O")
-        self.plot_embedding("X_tsne_O", "colors", "plasma")
+
+        original = self.ori
+        permuted = self.per
+
+        self.permute_expression_matrix(original, permuted)
+
+
+        self.compute_spaces_for_layer(layer=original)
+        self.compute_spaces_for_layer(layer=permuted)
+
+        self.plot_spaces_for_layer(layer=original)
+        self.plot_spaces_for_layer(layer=permuted)
+
+        self.compute_proximity_objects_for_layer(
+            layer=original)
+        self.compute_proximity_objects_for_layer(
+            layer=permuted)
+
+        self.compute_correlations_for_layer(layer=original)
+        self.compute_correlations_for_layer(layer=permuted)
+
+        self.plot_distribution_for_layer(layer=original)
+        self.plot_distribution_for_layer(layer=permuted)
+
+        print(self.A)
 
 
 
