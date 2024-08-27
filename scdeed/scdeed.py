@@ -395,6 +395,13 @@ class scDEED:
         fname = os.path.join(self.output, fname)
         fig.savefig(fname, bbox_inches="tight")
 
+    #=================================
+    def determine_percentiles(self, layer: str):
+        corr_tag = f"corr_{layer}"
+        vec = self.A.obs[corr_tag]
+        data = np.percentile(vec)
+
+
 
     #=================================
     def run(self):
