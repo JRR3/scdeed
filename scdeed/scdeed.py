@@ -74,7 +74,7 @@ class scDEED:
                 print(txt)
             else:
                 if input_is_matrix_market:
-                    self.convert_mm_from_source_to_anndata()
+                    self.A = sc.read_10x_mtx(self.source)
                 else:
                     for f in os.listdir(self.source):
                         if f.endswith('.h5ad'):
@@ -102,6 +102,9 @@ class scDEED:
         #Name for the permuted expression matrix layer
         self.per = "permuted"
 
+        self.FDT = np.float64
+
+
         if self.is_sparse:
             #Compute the density of the matrix
             rho = self.A.X.nnz / np.prod(self.A.X.shape)
@@ -117,15 +120,15 @@ class scDEED:
                        " of the count matrix.")
                 print(txt)
                 txt = ("Values will be converted to" 
-                       " float32.")
+                       f" {self.FDT}")
                 print(txt)
-                X = X.astype(np.float32)
+                X = X.astype(self.FDT)
             else:
                 self.is_sparse = True
                 #Make sure we use a CSC format.
-                X = sp.csc_matrix(self.A.X,
-                                  dtype=np.float32,
-                                  copy=True)
+                X = sp.csc_array(self.A.X,
+                                 dtype=self.FDT,
+                                 copy=True)
 
 
         else:
@@ -134,10 +137,9 @@ class scDEED:
             self.is_sparse = False
             X = self.A.X.copy()
             txt = ("Values will be converted to" 
-                   " float32.")
+                    f" {self.FDT}")
             print(txt)
-            X = X.astype(np.float32)
-
+            X = X.astype(self.FDT)
 
         if use_highly_variable:
 
@@ -154,6 +156,7 @@ class scDEED:
                 X = X[:, self.A.var[hv]]
 
         n_cells = X.shape[0]
+
         self.A.layers[self.ori] = X
 
 
@@ -172,7 +175,7 @@ class scDEED:
         self.n_pcs = n_pcs
 
         n_neighbors = frac_neighbors * n_cells
-        self.n_neighbors = np.int32(n_neighbors)
+        self.n_neighbors = int(n_neighbors)
 
     #=================================
     def permute_expression_matrix(self,
@@ -187,6 +190,7 @@ class scDEED:
 
         if not self.is_sparse:
             #Matrix is full.
+            #Permute the rows
             X = np.random.permutation(X)
 
         else:
@@ -235,6 +239,7 @@ class scDEED:
                  color_column: str,
                  color_map: Union[str, dict],
                  modifier: Optional[str] = "sc",
+                 set_legend_outside: Optional[bool] = False,
                  ):
         """
         Plot the first two columns of the embedding.
@@ -249,10 +254,16 @@ class scDEED:
             cmap = color_map,
             ticks=True,
         )
-        ax.set_aspect("equal")
+        # ax.set_aspect("equal")
+        if set_legend_outside:
+            ax.legend(loc="center left",
+                      bbox_to_anchor=(1, 0.5))
         fname = f"{tag}_{modifier}.pdf"
         fname = os.path.join(self.output, fname)
-        fig.savefig(fname, bbox_inches="tight")
+        if set_legend_outside:
+            fig.savefig(fname)
+        else:
+            fig.savefig(fname, bbox_inches="tight")
 
     #=================================
     def compute_tsne(self,
@@ -296,7 +307,7 @@ class scDEED:
         """
         This function defines the matrix objects
         that we use to construct the correlations.
-        Two types of matrices are produces.
+        Two types of matrices are produced.
         One is the matrix of neighbors and the 
         second is the matrix of distances.
         The matrix of neighbors is computed using
@@ -399,7 +410,35 @@ class scDEED:
     def determine_percentiles(self, layer: str):
         corr_tag = f"corr_{layer}"
         vec = self.A.obs[corr_tag]
-        data = np.percentile(vec)
+        pc = np.percentile(vec, [5, 95])
+        return pc
+
+    #=================================
+    def classify_cells(self,
+                       source_dist: str,
+                       percentiles: np.array,
+        ):
+
+        corr_tag = f"corr_{source_dist}"
+        vec = self.A.obs[corr_tag]
+        pc = np.percentile(vec, [5, 95])
+        dubious     = vec   < pc[0]
+        trustworthy = pc[1] < vec
+        status = "status"
+        self.A.obs[status] = "Undefined"
+        self.A.obs.loc[dubious, status] = "Dubious"
+        self.A.obs.loc[trustworthy, status] = "Trustworthy"
+
+        layer = self.ori
+        embd_tag = f"X_embd_{layer}"
+        color_map = {"Undefined": "gray",
+                     "Dubious":"red",
+                     "Trustworthy":"blue"}
+
+        self.plot_embedding(embd_tag,
+                            status,
+                            color_map,
+                            set_legend_outside=True)
 
 
 
@@ -429,7 +468,11 @@ class scDEED:
         self.plot_distribution_for_layer(layer=original)
         self.plot_distribution_for_layer(layer=permuted)
 
-        print(self.A)
+        pc = self.determine_percentiles(layer=permuted)
+        print(pc)
+        self.classify_cells(source_dist=original,
+                            percentiles= pc)
+
 
 
 
