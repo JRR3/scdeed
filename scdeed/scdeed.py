@@ -247,23 +247,24 @@ class scDEED:
 
         fig, ax = plt.subplots()
 
+        loc = "best"
+        if set_legend_outside:
+            loc = (1, 0.5)
+
         scprep.plot.scatter2d(
             self.A.obsm[tag],
             ax=ax,
             c = self.A.obs[color_column],
             cmap = color_map,
+            legend_loc = loc,
             ticks=True,
         )
-        # ax.set_aspect("equal")
-        if set_legend_outside:
-            ax.legend(loc="center left",
-                      bbox_to_anchor=(1, 0.5))
+
+        ax.set_aspect("equal")
+
         fname = f"{tag}_{modifier}.pdf"
         fname = os.path.join(self.output, fname)
-        if set_legend_outside:
-            fig.savefig(fname)
-        else:
-            fig.savefig(fname, bbox_inches="tight")
+        fig.savefig(fname, bbox_inches="tight")
 
     #=================================
     def compute_tsne(self,
@@ -438,6 +439,7 @@ class scDEED:
         self.plot_embedding(embd_tag,
                             status,
                             color_map,
+                            modifier= "status",
                             set_legend_outside=True)
 
 
