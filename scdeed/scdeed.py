@@ -38,7 +38,9 @@ class scDEED:
             n_pcs: Optional[int] = 2,
             use_highly_variable: Optional[bool] = False,
             use_full_matrix: Optional[bool] = False,
-            frac_neighbors: Optional[float] = 0.25,
+            frac_neighbors: Optional[float] = 0.50,
+            embedding_type: Optional[str] = "all",
+            main_title: Optional[str] = None,
             ):
         """
         The constructor takes the following inputs.
@@ -104,6 +106,15 @@ class scDEED:
 
         self.FDT = np.float64
 
+        self.list_of_embeddings = []
+        self.embedding_type = embedding_type
+
+        if embedding_type == "all":
+            self.list_of_embeddings = ["umap", "tsne"]
+        else:
+            self.list_of_embeddings = [embedding_type]
+
+
 
         if self.is_sparse:
             #Compute the density of the matrix
@@ -157,8 +168,16 @@ class scDEED:
 
         n_cells = X.shape[0]
 
-        self.A.layers[self.ori] = X
+        #We create a copy of the original anndata object
+        #to store the permuted version.
+        self.B = self.A.copy()
 
+        self.main_title = main_title
+
+        self.A.uns["modality"] = "original"
+        self.B.uns["modality"] = "permuted"
+
+        # self.A.layers[self.ori] = X
 
         #If no output directory is provided,
         #we use the current working directory.
@@ -178,17 +197,19 @@ class scDEED:
         self.n_neighbors = int(n_neighbors)
 
     #=================================
-    def permute_expression_matrix(self,
-                                  source_layer: str,
-                                  target_layer: str):
+    def permute_expression_matrix(self):
         """
         This function permutes the entries of 
-        each column/gene.
+        each column/gene of the original expression
+        matrix.
+
+        We use the anndata object B to store anything 
+        related to the permuted version.
         """
 
-        X = self.A.layers[source_layer].copy()
+        X = self.B.X.copy()
 
-        if not self.is_sparse:
+        if not sp.issparse(X):
             #Matrix is full.
             #Permute the rows
             X = np.random.permutation(X)
@@ -206,43 +227,49 @@ class scDEED:
                 end = X.indptr[k+1]
                 X.data[start:end] = p_col
         
-        self.A.layers[target_layer] = X
+        self.B.X = X
 
     #=================================
-    def compute_spaces_for_layer(self,
-                                 layer: str,
-                                 ):
-        pca_tag = f"X_pca_{layer}"
-        embd_tag= f"X_embd_{layer}"
-        self.compute_pca(layer=layer,
-                         tag = pca_tag,)
-        self.compute_tsne(use_rep=pca_tag,
-                          tag = embd_tag,)
+    def compute_spaces_for_anndata(self,
+                                   adata: sc.AnnData,
+        ):
 
-
-    #=================================
-    def compute_pca(self,
-                    layer: str,
-                    tag: str,
-                    ):
-
-        self.A.obsm[tag] = sc.pp.pca(
-            self.A.layers[layer],
-            n_comps=self.n_pcs,
-            svd_solver="auto",
+        sc.pp.pca(adata,
+                  n_comps=self.n_pcs,
+                  svd_solver="auto",
         )
 
 
+        #Choose between the different 
+        #types of embeddings
+        if self.embedding_type == "tsne":
+            self.compute_tsne(adata)
+
+        elif self.embedding_type == "umap":
+            self.compute_umap(adata)
+
+        elif self.embedding_type == "all":
+            self.compute_umap(adata)
+            self.compute_tsne(adata)
+
+
     #=================================
-    def plot_embedding(self,
-                 tag: str,
-                 color_column: str,
-                 color_map: Union[str, dict],
-                 modifier: Optional[str] = "sc",
-                 set_legend_outside: Optional[bool] = False,
-                 ):
+    def plot_embedding(
+            self,
+            adata: sc.AnnData,
+            descriptor: str,
+            color_column: str,
+            color_map: Union[str, dict],
+            modifier: Optional[str] = "sc",
+            set_legend_outside: Optional[bool] = False,
+            order: Optional[str] = None,
+            fig_format: Optional[str] = "png",
+        ):
         """
         Plot the first two columns of the embedding.
+        The color_column is the column in the 
+        AnnData.obs data frame that contains 
+        (a description of) the colors.
         """
 
         fig, ax = plt.subplots()
@@ -251,33 +278,71 @@ class scDEED:
         if set_legend_outside:
             loc = (1, 0.5)
 
+        mat = adata.obsm[descriptor]
+        colors = adata.obs[color_column]
+
+        #Change the order of the points if we want
+        #to emphasize certain points in the plot.
+        #The points that are located at the end are
+        #plotted last.
+        if order is None:
+            pass
+        else:
+            indices = np.argsort(adata.obs[order])
+            mat = mat[indices,:]
+            colors = colors.iloc[indices]
+
         scprep.plot.scatter2d(
-            self.A.obsm[tag],
-            ax=ax,
-            c = self.A.obs[color_column],
+            mat,
+            c = colors,
             cmap = color_map,
             legend_loc = loc,
-            ticks=True,
+            ticks=False,
+            title=self.main_title,
+            ax=ax,
         )
 
         ax.set_aspect("equal")
 
-        fname = f"{tag}_{modifier}.pdf"
+        modality = adata.uns["modality"]
+
+        fname = f"{descriptor}_{modifier}_{modality}.{fig_format}"
         fname = os.path.join(self.output, fname)
         fig.savefig(fname, bbox_inches="tight")
 
     #=================================
     def compute_tsne(self,
-                     use_rep: str,
-                     tag: str,
-                     perplexity: Optional[float] = 30):
+                     adata: sc.AnnData,
+                     perplexity: Optional[float] = 30,
+        ):
 
-        sc.tl.tsne(self.A,
+        sc.tl.tsne(adata,
                    perplexity=perplexity,
                    n_pcs=self.n_pcs,
-                   use_rep=use_rep)
+                   use_rep="X_pca",
+        )
 
-        self.A.obsm[tag] = self.A.obsm["X_tsne"].copy()
+    #=================================
+    def compute_umap(self,
+                     adata: sc.AnnData,
+                     n_neighbors: Optional[int] = 30,
+                     min_distance: Optional[float] = 0.9,
+        ):
+
+
+        neighbors_tag= "umap_neighbors"
+
+        sc.pp.neighbors(adata,
+                        n_neighbors = n_neighbors,
+                        key_added = neighbors_tag,
+                        use_rep="X_pca",
+        )
+
+        sc.tl.umap(adata,
+                   neighbors_key= neighbors_tag,
+        )
+
+
 
     #=================================
     def compute_null_distribution(self):
@@ -285,9 +350,9 @@ class scDEED:
         p_mtx = self.permute_each_column(mtx)
 
     #=================================
-    def plot_spaces_for_layer(
+    def plot_spaces_for_anndata(
             self,
-            layer: str,
+            adata: sc.AnnData,
             color_column: Optional[str] = "colors",
             color_map: Optional[str] = "plasma",
     ):
@@ -295,16 +360,26 @@ class scDEED:
         Plot the pre-embedding space (projected onto R^2) 
         and the embedding space.
         """
-        pca_tag = f"X_pca_{layer}"
-        embd_tag = f"X_embd_{layer}"
 
-        self.plot_embedding(pca_tag, color_column, color_map)
-        self.plot_embedding(embd_tag, color_column, color_map)
+        self.plot_embedding(adata,
+                            "X_pca",
+                            color_column,
+                            color_map,
+        )
+
+        for embedding_type in self.list_of_embeddings:
+            embedding_str = "X_" + embedding_type
+            self.plot_embedding(adata,
+                                embedding_str,
+                                color_column,
+                                color_map,
+            )
 
     #=================================
-    def compute_proximity_objects_for_layer(self,
-                                            layer: str,
-                                            ):
+    def compute_proximity_objects_for_anndata(
+            self,
+            adata: sc.AnnData,
+        ):
         """
         This function defines the matrix objects
         that we use to construct the correlations.
@@ -316,32 +391,37 @@ class scDEED:
         The matrix of distances is computed using
         the pairwise function from sklearn.
         """
-        pca_mtx = f"X_pca_{layer}"
-        embd_mtx = f"X_embd_{layer}"
 
-        pca_ngb = f"pca_ngb_{layer}"
-        embd_ngb = f"embd_ngb_{layer}"
-        embd_dist = f"embd_dist_{layer}"
-        embd_sort_dist = f"embd_sort_dist_{layer}"
 
+        #The matrix of neighbors for the PCA space.
+        pca_str = f"X_pca"
         pca_nn_obj = NearestNeighbors(
             n_neighbors=self.n_neighbors,
             algorithm="ball_tree",
-            ).fit(self.A.obsm[pca_mtx])
+            ).fit(adata.obsm[pca_str])
 
-        embd_nn_obj = NearestNeighbors(
-            n_neighbors=self.n_neighbors,
-            algorithm="ball_tree",
-            ).fit(self.A.obsm[embd_mtx])
-
-        self.A.obsm[pca_ngb] = pca_nn_obj.kneighbors(
+        pca_ngb = f"pca_neighbors"
+        adata.obsm[pca_ngb] = pca_nn_obj.kneighbors(
             return_distance=False)
 
-        (self.A.obsm[embd_sort_dist],
-         self.A.obsm[embd_ngb]) = embd_nn_obj.kneighbors()
+        #The matrix of neighbors for the embedding space.
+        for embedding_type in self.list_of_embeddings:
 
-        self.A.obsm[embd_dist] = pairwise_distances(
-            self.A.obsm[embd_mtx], metric="euclidean")
+            embedding_str = "X_" + embedding_type
+            embd_nn_obj = NearestNeighbors(
+                n_neighbors=self.n_neighbors,
+                algorithm="ball_tree",
+                ).fit(adata.obsm[embedding_str])
+
+            embd_sort_dist = (f"{embedding_type}"
+                              "_sorted_distances")
+            embd_ngb       = f"{embedding_type}_neighbors"
+            (adata.obsm[embd_sort_dist],
+             adata.obsm[embd_ngb]) = embd_nn_obj.kneighbors()
+
+            embd_dist = f"{embedding_type}_distances"
+            adata.obsm[embd_dist] = pairwise_distances(
+                adata.obsm[embedding_str], metric="euclidean")
 
     #=================================
     def correlation_function(self,
@@ -365,115 +445,151 @@ class scDEED:
         return m[0,1]
 
     #=================================
-    def compute_correlations_for_layer(self,
-                                       layer: str):
+    def compute_correlations_for_anndata(self,
+                                         adata: sc.AnnData):
 
-        pca_ngb = f"pca_ngb_{layer}"
-        embd_ngb = f"embd_ngb_{layer}"
-        embd_sort_dist = f"embd_sort_dist_{layer}"
-        embd_dist = f"embd_dist_{layer}"
-
-        pca_ngb_mtx = self.A.obsm[pca_ngb]
         #embd_ngb_mtx = self.A.obsm[embd_ngb]
-        embd_sort_dist_mtx = self.A.obsm[embd_sort_dist]
-        embd_dist_mtx = self.A.obsm[embd_dist]
+        # embd_ngb    = f"embedding_neighbors"
 
-        Z = zip(embd_dist_mtx,
-                embd_sort_dist_mtx,
-                pca_ngb_mtx)
+        pca_ngb        = f"pca_neighbors"
+        pca_ngb_mtx    = adata.obsm[pca_ngb]
 
-        with Pool(processes=6) as pool:
-            C = pool.starmap(self.correlation_function, Z)
+        for embedding_type in self.list_of_embeddings:
+            embd_sort_dist = (f"{embedding_type}"
+                              "_sorted_distances")
+            embd_dist      = f"{embedding_type}_distances"
+
+            embd_sort_dist_mtx = adata.obsm[embd_sort_dist]
+            embd_dist_mtx      = adata.obsm[embd_dist]
+
+            Z = zip(embd_dist_mtx,
+                    embd_sort_dist_mtx,
+                    pca_ngb_mtx)
+
+            with Pool(processes=6) as pool:
+                C = pool.starmap(self.correlation_function,
+                                Z)
+
+            corr_tag = f"{embedding_type}_correlations"
+            adata.obs[corr_tag] = C
         
-        print(describe(C))
-
-        corr_tag = f"corr_{layer}"
-        self.A.obs[corr_tag] = C
 
 
     #=================================
-    def plot_distribution_for_layer(self,
-                                       layer: str):
-        corr_tag = f"corr_{layer}"
-        fig, ax = plt.subplots()
-        xlabel = f"Correlation ({layer} cells)"
-        scprep.plot.histogram(self.A.obs[corr_tag],
-                              xlabel=xlabel,
-                              ylabel="# of cells",
-                              ax = ax,
-                              )
+    def plot_distribution_for_anndata(self,
+                                      adata: sc.AnnData,
+                                      fig_format: Optional[str] = "png",
+        ):
+        for embedding_type in self.list_of_embeddings:
+            corr_tag = f"{embedding_type}_correlations"
+            fig, ax = plt.subplots()
+            modality = adata.uns["modality"]
+            xlabel = f"Correlation ({modality} cells)"
+            scprep.plot.histogram(adata.obs[corr_tag],
+                                  xlabel=xlabel,
+                                  ylabel="# of cells",
+                                  title=self.main_title,
+                                  ax = ax,
+            )
 
-        fname = f"distribution_{layer}.pdf"
-        fname = os.path.join(self.output, fname)
-        fig.savefig(fname, bbox_inches="tight")
+            fname = f"distribution_{corr_tag}_{modality}.{fig_format}"
+            fname = os.path.join(self.output, fname)
+            fig.savefig(fname, bbox_inches="tight")
 
     #=================================
-    def determine_percentiles(self, layer: str):
-        corr_tag = f"corr_{layer}"
-        vec = self.A.obs[corr_tag]
-        pc = np.percentile(vec, [5, 95])
-        return pc
+    def determine_percentiles_for_anndata(
+            self, adata: sc.AnnData):
+
+        for embedding_type in self.list_of_embeddings:
+            corr_tag = f"{embedding_type}_correlations"
+            vec = adata.obs[corr_tag]
+            pc = np.percentile(vec, [5, 95])
+            percentile_tag = f"{embedding_type}_percentile"
+            adata.uns[percentile_tag] = pc
+            
 
     #=================================
     def classify_cells(self,
-                       source_dist: str,
-                       percentiles: np.array,
+                       adata: sc.AnnData,
+                       null_dist_adata: sc.AnnData,
         ):
+        """
+        The adata object will be classified
+        using the null_dist_adata object. 
+        The null_dist_adata was generated using a 
+        permuted version of the original anndata.
 
-        corr_tag = f"corr_{source_dist}"
-        vec = self.A.obs[corr_tag]
-        pc = np.percentile(vec, [5, 95])
-        dubious     = vec   < pc[0]
-        trustworthy = pc[1] < vec
-        status = "status"
-        self.A.obs[status] = "Undefined"
-        self.A.obs.loc[dubious, status] = "Dubious"
-        self.A.obs.loc[trustworthy, status] = "Trustworthy"
+        We have three categories:
 
-        layer = self.ori
-        embd_tag = f"X_embd_{layer}"
+        Trustworthy
+        Undefined
+        Dubious
+
+        """
+
         color_map = {"Undefined": "gray",
                      "Dubious":"red",
                      "Trustworthy":"blue"}
 
-        self.plot_embedding(embd_tag,
-                            status,
-                            color_map,
-                            modifier= "status",
-                            set_legend_outside=True)
+        order_map = {"Undefined":0,
+                     "Trustworthy":1,
+                     "Dubious":2,
+                     }
+
+        for embedding_type in self.list_of_embeddings:
+
+            corr_tag = f"{embedding_type}_correlations"
+            percentile_tag = f"{embedding_type}_percentile"
+            null_dist_percentiles = null_dist_adata.uns[
+                percentile_tag]
+            corr_vec = adata.obs[corr_tag]
+            dubious  = corr_vec < null_dist_percentiles[0]
+            trustworthy = null_dist_percentiles[1] < corr_vec
+            status = f"{embedding_type}_status"
+            adata.obs[status] = "Undefined"
+            adata.obs.loc[dubious,     status] = "Dubious"
+            adata.obs.loc[trustworthy, status] = "Trustworthy"
+
+            embd_tag = f"X_{embedding_type}"
+
+
+            #Rank the elements using the order_map.
+            rank = f"{embedding_type}_rank"
+            adata.obs[rank] = adata.obs[status].map(
+                order_map)
+
+            self.plot_embedding(adata,
+                                descriptor  = embd_tag,
+                                color_column= status,
+                                color_map   = color_map,
+                                modifier    = status,
+                                order       = rank,
+                                set_legend_outside=True)
 
 
 
     #=================================
     def run(self):
 
-        original = self.ori
-        permuted = self.per
+        self.permute_expression_matrix()
 
-        self.permute_expression_matrix(original, permuted)
+        self.compute_spaces_for_anndata(self.A)
+        self.compute_spaces_for_anndata(self.B)
 
+        self.plot_spaces_for_anndata(self.A)
+        self.plot_spaces_for_anndata(self.B)
 
-        self.compute_spaces_for_layer(layer=original)
-        self.compute_spaces_for_layer(layer=permuted)
+        self.compute_proximity_objects_for_anndata(self.A)
+        self.compute_proximity_objects_for_anndata(self.B)
 
-        self.plot_spaces_for_layer(layer=original)
-        self.plot_spaces_for_layer(layer=permuted)
+        self.compute_correlations_for_anndata(self.A)
+        self.compute_correlations_for_anndata(self.B)
 
-        self.compute_proximity_objects_for_layer(
-            layer=original)
-        self.compute_proximity_objects_for_layer(
-            layer=permuted)
+        self.plot_distribution_for_anndata(self.A)
+        self.plot_distribution_for_anndata(self.B)
 
-        self.compute_correlations_for_layer(layer=original)
-        self.compute_correlations_for_layer(layer=permuted)
-
-        self.plot_distribution_for_layer(layer=original)
-        self.plot_distribution_for_layer(layer=permuted)
-
-        pc = self.determine_percentiles(layer=permuted)
-        print(pc)
-        self.classify_cells(source_dist=original,
-                            percentiles= pc)
+        self.determine_percentiles_for_anndata(self.B)
+        self.classify_cells(self.A, null_dist_adata = self.B)
 
 
 
