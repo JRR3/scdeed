@@ -41,6 +41,7 @@ class scDEED:
             frac_neighbors: Optional[float] = 0.50,
             embedding_type: Optional[str] = "all",
             main_title: Optional[str] = None,
+            use_manifold_as_pre: Optional[bool] = False,
             ):
         """
         The constructor takes the following inputs.
@@ -196,6 +197,8 @@ class scDEED:
         n_neighbors = frac_neighbors * n_cells
         self.n_neighbors = int(n_neighbors)
 
+        self.use_manifold_as_pre = use_manifold_as_pre
+
     #=================================
     def permute_expression_matrix(self):
         """
@@ -234,10 +237,15 @@ class scDEED:
                                    adata: sc.AnnData,
         ):
 
-        sc.pp.pca(adata,
-                  n_comps=self.n_pcs,
-                  svd_solver="auto",
-        )
+        #This is the pre-embedding space.
+        #By default it is the PCA space.
+        if self.use_manifold_as_pre:
+            pass
+        else:
+            sc.pp.pca(adata,
+                    n_comps=self.n_pcs,
+                    svd_solver="auto",
+            )
 
 
         #Choose between the different 
@@ -361,11 +369,14 @@ class scDEED:
         and the embedding space.
         """
 
-        self.plot_embedding(adata,
-                            "X_pca",
-                            color_column,
-                            color_map,
-        )
+        if self.use_manifold_as_pre:
+            pass
+        else:
+            self.plot_embedding(adata,
+                                "X_pca",
+                                color_column,
+                                color_map,
+            )
 
         for embedding_type in self.list_of_embeddings:
             embedding_str = "X_" + embedding_type
@@ -374,6 +385,50 @@ class scDEED:
                                 color_column,
                                 color_map,
             )
+
+    #=================================
+    def compute_manifold_neighbor_matrix(self):
+        """
+        This function assumes that we have an ordered
+        1D manifold. By ordered, we mean that for any
+        two distinct points P1, P2, we can establish if 
+        P1 < P2, or P2 < P1.
+        """
+        n_points = self.A.X.shape[0]
+        manifold_distance_matrix = np.ones((n_points,n_points))
+        manifold_distance_matrix *= np.inf
+        one_step_distances = np.zeros(n_points-1)
+
+        #Compute distances for adjacent points.
+        for i in range(n_points-1):
+            a = self.manifold[i]
+            b = self.manifold[i+1]
+            d = np.linalg.norm(a-b)
+            one_step_distances[i] = d
+
+        #Compute distances between two (ordered)
+        #points.
+        for i in range(n_points-1):
+            for j in range(i+1,n_points):
+                d = one_step_distances[i:j].sum()
+                manifold_distance_matrix[i,j] = d
+
+        # fname = "manifold_distance_matrix.npy"
+        # fname = os.path.join(self.output, fname)
+        # print(manifold_distance_matrix)
+        # np.save(fname, manifold_distance_matrix)
+
+        manifold_distance_matrix += manifold_distance_matrix.T
+
+        manifold_neighbor_matrix = np.zeros((n_points,
+                                             self.n_neighbors),
+                                             dtype=int)
+        for k, row in enumerate(manifold_distance_matrix):
+            indices = np.argsort(row)
+            indices = indices[:self.n_neighbors]
+            manifold_neighbor_matrix[k] = indices
+
+        return manifold_neighbor_matrix
 
     #=================================
     def compute_proximity_objects_for_anndata(
@@ -393,16 +448,20 @@ class scDEED:
         """
 
 
-        #The matrix of neighbors for the PCA space.
-        pca_str = f"X_pca"
-        pca_nn_obj = NearestNeighbors(
-            n_neighbors=self.n_neighbors,
-            algorithm="ball_tree",
-            ).fit(adata.obsm[pca_str])
+        # The matrix of neighbors for the pre-embedding
+        # space.
+        if self.use_manifold_as_pre:
+            pass
+        else:
+            pca_str = f"X_pca"
+            pca_nn_obj = NearestNeighbors(
+                n_neighbors=self.n_neighbors,
+                algorithm="ball_tree",
+                ).fit(adata.obsm[pca_str])
 
-        pca_ngb = f"pca_neighbors"
-        adata.obsm[pca_ngb] = pca_nn_obj.kneighbors(
-            return_distance=False)
+            pca_ngb = f"pca_neighbors"
+            adata.obsm[pca_ngb] = pca_nn_obj.kneighbors(
+                return_distance=False)
 
         #The matrix of neighbors for the embedding space.
         for embedding_type in self.list_of_embeddings:
