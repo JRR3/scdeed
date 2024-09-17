@@ -42,6 +42,7 @@ class scDEED:
             embedding_type: Optional[str] = "all",
             main_title: Optional[str] = None,
             use_manifold_as_pre: Optional[bool] = False,
+            using_1D_ordered_manifold: Optional[bool] = False,
             ):
         """
         The constructor takes the following inputs.
@@ -190,7 +191,9 @@ class scDEED:
         if not os.path.exists(output):
             os.makedirs(output)
 
-        self.output = os.path.abspath(output)
+        # self.output = os.path.abspath(output)
+
+        self.output = output
 
         self.n_pcs = n_pcs
 
@@ -198,9 +201,11 @@ class scDEED:
         self.n_neighbors = int(n_neighbors)
 
         self.use_manifold_as_pre = use_manifold_as_pre
+        self.using_1D_ordered_manifold = using_1D_ordered_manifold
 
     #=================================
-    def permute_expression_matrix(self):
+    def permute_expression_matrix(self,
+                                  adata: sc.AnnData):
         """
         This function permutes the entries of 
         each column/gene of the original expression
@@ -210,19 +215,28 @@ class scDEED:
         related to the permuted version.
         """
 
-        X = self.B.X.copy()
+        X = adata.X.copy()
+        n_genes = X.shape[1]
 
         if not sp.issparse(X):
             #Matrix is full.
             #Permute the rows
-            X = np.random.permutation(X)
+
+            # X = np.random.permutation(X)
+            # Note that if pass the whole matrix
+            # to the permutation function, we only
+            # get a permutation of row vectors and
+            # not of the whole matrix. Hence, we 
+            # permute one column at a time.
+
+            for k in range(n_genes):
+                X[:,k] = np.random.permutation(X[:,k])
 
         else:
             #Matrix is sparse.
             #Note that the matrix has the CSC format 
             #by design. This allows us to work directly
             #on the data structure of the matrix.
-            n_genes = X.shape[1]
             for k in range(n_genes):
                 col = X.getcol(k)
                 p_col = np.random.permutation(col.data)
@@ -230,23 +244,26 @@ class scDEED:
                 end = X.indptr[k+1]
                 X.data[start:end] = p_col
         
-        self.B.X = X
+        adata.X = X
 
     #=================================
     def compute_spaces_for_anndata(self,
                                    adata: sc.AnnData,
         ):
 
-        #This is the pre-embedding space.
-        #By default it is the PCA space.
-        if self.use_manifold_as_pre:
-            pass
-        else:
-            sc.pp.pca(adata,
-                    n_comps=self.n_pcs,
-                    svd_solver="auto",
-            )
+        sc.pp.pca(adata,
+                n_comps=self.n_pcs,
+                svd_solver="auto",
+        )
 
+        if self.use_manifold_as_pre:
+            #Store a reference.
+            adata.obsm["X_pre"] = adata.X
+        else:
+            #We use the PCA space as the
+            #pre-embedding space.
+            #Store a reference.
+            adata.obsm["X_pre"] = adata.obsm["X_pca"]
 
         #Choose between the different 
         #types of embeddings
@@ -327,7 +344,7 @@ class scDEED:
         sc.tl.tsne(adata,
                    perplexity=perplexity,
                    n_pcs=self.n_pcs,
-                   use_rep="X_pca",
+                   use_rep="X_pre",
         )
 
     #=================================
@@ -343,7 +360,7 @@ class scDEED:
         sc.pp.neighbors(adata,
                         n_neighbors = n_neighbors,
                         key_added = neighbors_tag,
-                        use_rep="X_pca",
+                        use_rep="X_pre",
         )
 
         sc.tl.umap(adata,
@@ -351,11 +368,6 @@ class scDEED:
         )
 
 
-
-    #=================================
-    def compute_null_distribution(self):
-        mtx = self.A.obsm["X_pca"]
-        p_mtx = self.permute_each_column(mtx)
 
     #=================================
     def plot_spaces_for_anndata(
@@ -373,7 +385,7 @@ class scDEED:
             pass
         else:
             self.plot_embedding(adata,
-                                "X_pca",
+                                "X_pre",
                                 color_column,
                                 color_map,
             )
@@ -387,22 +399,28 @@ class scDEED:
             )
 
     #=================================
-    def compute_manifold_neighbor_matrix(self):
+    def compute_manifold_neighbor_matrix(self,
+                                         adata: sc.AnnData):
         """
         This function assumes that we have an ordered
         1D manifold. By ordered, we mean that for any
         two distinct points P1, P2, we can establish if 
         P1 < P2, or P2 < P1.
         """
-        n_points = self.A.X.shape[0]
-        manifold_distance_matrix = np.ones((n_points,n_points))
-        manifold_distance_matrix *= np.inf
+        n_points = adata.X.shape[0]
+        manifold_distance_matrix = np.zeros((n_points,n_points))
+
+        # We make the main diagonal equal to infinity
+        # to avoid labeling each cell as its nearest neighbor.
+        for i in range(n_points):
+            manifold_distance_matrix[i,i] = np.inf
+
         one_step_distances = np.zeros(n_points-1)
 
         #Compute distances for adjacent points.
         for i in range(n_points-1):
-            a = self.manifold[i]
-            b = self.manifold[i+1]
+            a = adata.X[i]
+            b = adata.X[i+1]
             d = np.linalg.norm(a-b)
             one_step_distances[i] = d
 
@@ -419,6 +437,7 @@ class scDEED:
         # np.save(fname, manifold_distance_matrix)
 
         manifold_distance_matrix += manifold_distance_matrix.T
+        # print(manifold_distance_matrix)
 
         manifold_neighbor_matrix = np.zeros((n_points,
                                              self.n_neighbors),
@@ -428,7 +447,11 @@ class scDEED:
             indices = indices[:self.n_neighbors]
             manifold_neighbor_matrix[k] = indices
 
-        return manifold_neighbor_matrix
+        # print(manifold_neighbor_matrix)
+
+        txt = "manifold_neighbor_matrix"
+        adata.obsm[txt] = manifold_neighbor_matrix
+
 
     #=================================
     def compute_proximity_objects_for_anndata(
@@ -453,14 +476,14 @@ class scDEED:
         if self.use_manifold_as_pre:
             pass
         else:
-            pca_str = f"X_pca"
-            pca_nn_obj = NearestNeighbors(
+            pre_str = f"X_pre"
+            pre_nn_obj = NearestNeighbors(
                 n_neighbors=self.n_neighbors,
                 algorithm="ball_tree",
-                ).fit(adata.obsm[pca_str])
+                ).fit(adata.obsm[pre_str])
 
-            pca_ngb = f"pca_neighbors"
-            adata.obsm[pca_ngb] = pca_nn_obj.kneighbors(
+            pre_ngb = f"pre_neighbors"
+            adata.obsm[pre_ngb] = pre_nn_obj.kneighbors(
                 return_distance=False)
 
         #The matrix of neighbors for the embedding space.
@@ -504,14 +527,17 @@ class scDEED:
         return m[0,1]
 
     #=================================
-    def compute_correlations_for_anndata(self,
-                                         adata: sc.AnnData):
+    def compute_correlations_for_anndata(
+            self,
+            adata: sc.AnnData,
+            pre_ngb_label: Optional[str] = "pre_neighbors",
+            special_tag: Optional[str] = "",
+        ):
 
         #embd_ngb_mtx = self.A.obsm[embd_ngb]
         # embd_ngb    = f"embedding_neighbors"
 
-        pca_ngb        = f"pca_neighbors"
-        pca_ngb_mtx    = adata.obsm[pca_ngb]
+        pre_ngb_mtx    = adata.obsm[pre_ngb_label]
 
         for embedding_type in self.list_of_embeddings:
             embd_sort_dist = (f"{embedding_type}"
@@ -523,13 +549,14 @@ class scDEED:
 
             Z = zip(embd_dist_mtx,
                     embd_sort_dist_mtx,
-                    pca_ngb_mtx)
+                    pre_ngb_mtx)
 
             with Pool(processes=6) as pool:
                 C = pool.starmap(self.correlation_function,
                                 Z)
 
             corr_tag = f"{embedding_type}_correlations"
+            corr_tag += special_tag
             adata.obs[corr_tag] = C
         
 
@@ -571,6 +598,7 @@ class scDEED:
     def classify_cells(self,
                        adata: sc.AnnData,
                        null_dist_adata: sc.AnnData,
+                       special_tag: Optional[str] = "",
         ):
         """
         The adata object will be classified
@@ -598,30 +626,34 @@ class scDEED:
         for embedding_type in self.list_of_embeddings:
 
             corr_tag = f"{embedding_type}_correlations"
+            corr_tag += special_tag
             percentile_tag = f"{embedding_type}_percentile"
             null_dist_percentiles = null_dist_adata.uns[
                 percentile_tag]
             corr_vec = adata.obs[corr_tag]
+            #5-th percentile
             dubious  = corr_vec < null_dist_percentiles[0]
+            #95-th percentile
             trustworthy = null_dist_percentiles[1] < corr_vec
-            status = f"{embedding_type}_status"
-            adata.obs[status] = "Undefined"
-            adata.obs.loc[dubious,     status] = "Dubious"
-            adata.obs.loc[trustworthy, status] = "Trustworthy"
+            dub_state = f"dubiousness_{embedding_type}"
+            dub_state += special_tag
+            adata.obs[dub_state] = "Undefined"
+            adata.obs.loc[dubious,     dub_state] = "Dubious"
+            adata.obs.loc[trustworthy, dub_state] = "Trustworthy"
 
             embd_tag = f"X_{embedding_type}"
 
 
             #Rank the elements using the order_map.
             rank = f"{embedding_type}_rank"
-            adata.obs[rank] = adata.obs[status].map(
+            adata.obs[rank] = adata.obs[dub_state].map(
                 order_map)
 
             self.plot_embedding(adata,
                                 descriptor  = embd_tag,
-                                color_column= status,
+                                color_column= dub_state,
                                 color_map   = color_map,
-                                modifier    = status,
+                                modifier    = dub_state,
                                 order       = rank,
                                 set_legend_outside=True)
 
@@ -630,7 +662,9 @@ class scDEED:
     #=================================
     def run(self):
 
-        self.permute_expression_matrix()
+
+        #Originally, B is a copy of A.
+        self.permute_expression_matrix(self.B)
 
         self.compute_spaces_for_anndata(self.A)
         self.compute_spaces_for_anndata(self.B)
@@ -649,6 +683,19 @@ class scDEED:
 
         self.determine_percentiles_for_anndata(self.B)
         self.classify_cells(self.A, null_dist_adata = self.B)
+
+        if self.using_1D_ordered_manifold:
+            self.compute_manifold_neighbor_matrix(self.A)
+            self.compute_correlations_for_anndata(
+                self.A,
+                pre_ngb_label="manifold_neighbor_matrix",
+                special_tag = "_manifold"
+                )
+            self.classify_cells(self.A,
+                                null_dist_adata = self.B,
+                                special_tag="_manifold")
+
+
 
 
 
