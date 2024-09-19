@@ -2,7 +2,7 @@
 #Princess Margaret Cancer Research Tower
 #Schwartz Lab
 #Javier Ruiz Ramirez
-#August 2024
+#September 2024
 #########################################################
 #This is a Python implementation of the R package
 #scDEED
@@ -28,6 +28,12 @@ from scipy.stats import describe
 from time import perf_counter as clock
 mpl.rcParams["figure.dpi"] = 600
 mpl.use("agg")
+
+# import fire
+# import sys
+# from os.path import dirname
+# sys.path.insert(0, dirname(dirname(dirname(__file__))))
+# import scripts.common as common
 
 class scDEED:
     #=================================================
@@ -112,7 +118,7 @@ class scDEED:
         self.embedding_type = embedding_type
 
         if embedding_type == "all":
-            self.list_of_embeddings = ["umap", "tsne"]
+            self.list_of_embeddings = ["umap", "tsne", "pca"]
         else:
             self.list_of_embeddings = [embedding_type]
 
@@ -201,7 +207,8 @@ class scDEED:
         self.n_neighbors = int(n_neighbors)
 
         self.use_manifold_as_pre = use_manifold_as_pre
-        self.using_1D_ordered_manifold = using_1D_ordered_manifold
+        x = using_1D_ordered_manifold
+        self.using_1D_ordered_manifold = x
 
     #=================================
     def permute_expression_matrix(self,
@@ -288,7 +295,7 @@ class scDEED:
             modifier: Optional[str] = "sc",
             set_legend_outside: Optional[bool] = False,
             order: Optional[str] = None,
-            fig_format: Optional[str] = "png",
+            fig_format: Optional[str] = "pdf",
         ):
         """
         Plot the first two columns of the embedding.
@@ -298,6 +305,7 @@ class scDEED:
         """
 
         fig, ax = plt.subplots()
+        title = self.main_title
 
         loc = "best"
         if set_legend_outside:
@@ -305,6 +313,31 @@ class scDEED:
 
         mat = adata.obsm[descriptor]
         colors = adata.obs[color_column]
+
+        #descriptor = X_{embedding_type}
+        embedding_type = descriptor[2:]
+        if embedding_type in self.list_of_embeddings:
+
+            special_tag = ""
+
+            embd_expansion = f"{embedding_type}_expansion"
+            embd_expansion += special_tag
+            if embd_expansion in adata.uns:
+                expansion = adata.uns[embd_expansion]
+                title += f", E={expansion:.2E}"
+
+            embd_contraction = f"{embedding_type}_contraction"
+            embd_contraction += special_tag
+            if embd_contraction in adata.uns:
+                contraction = adata.uns[embd_contraction]
+                title += f", C={contraction:.2E}"
+
+            embd_distortion = f"{embedding_type}_distortion"
+            embd_distortion += special_tag
+            if embd_distortion in adata.uns:
+                distortion = adata.uns[embd_distortion]
+                title += f", D={distortion:.2E}"
+
 
         #Change the order of the points if we want
         #to emphasize certain points in the plot.
@@ -323,7 +356,7 @@ class scDEED:
             cmap = color_map,
             legend_loc = loc,
             ticks=False,
-            title=self.main_title,
+            title=title,
             ax=ax,
         )
 
@@ -437,7 +470,8 @@ class scDEED:
         # np.save(fname, manifold_distance_matrix)
 
         manifold_distance_matrix += manifold_distance_matrix.T
-        # print(manifold_distance_matrix)
+        txt = "manifold_distance_matrix"
+        adata.obsm[txt] = manifold_distance_matrix
 
         manifold_neighbor_matrix = np.zeros((n_points,
                                              self.n_neighbors),
@@ -468,23 +502,36 @@ class scDEED:
         the NearestNeighbors function from sklearn.
         The matrix of distances is computed using
         the pairwise function from sklearn.
+
+        Note that in the case where the entire
+        manifold is the pre-embedding space the
+        computations could be very expensive.
+        Also, note that the natural metric within 
+        the manifold might not necessarily be the
+        Euclidean metric.
         """
 
-
-        # The matrix of neighbors for the pre-embedding
-        # space.
         if self.use_manifold_as_pre:
-            pass
+            matrix = adata.X
         else:
             pre_str = f"X_pre"
-            pre_nn_obj = NearestNeighbors(
-                n_neighbors=self.n_neighbors,
-                algorithm="ball_tree",
-                ).fit(adata.obsm[pre_str])
+            matrix = adata.obsm[pre_str]
 
-            pre_ngb = f"pre_neighbors"
-            adata.obsm[pre_ngb] = pre_nn_obj.kneighbors(
-                return_distance=False)
+        #Note that this function assumes the 
+        #Euclidean distance.
+        pre_nn_obj = NearestNeighbors(
+            n_neighbors=self.n_neighbors,
+            algorithm="ball_tree",
+            ).fit(matrix)
+
+        pre_ngb = f"pre_neighbors"
+        adata.obsm[pre_ngb] = pre_nn_obj.kneighbors(
+            return_distance=False)
+
+        #Distance matrix for the pre-embedding space.
+        pre_dist = f"pre_distances"
+        adata.obsm[pre_dist] = pairwise_distances(
+            matrix, metric="euclidean")
 
         #The matrix of neighbors for the embedding space.
         for embedding_type in self.list_of_embeddings:
@@ -504,6 +551,15 @@ class scDEED:
             embd_dist = f"{embedding_type}_distances"
             adata.obsm[embd_dist] = pairwise_distances(
                 adata.obsm[embedding_str], metric="euclidean")
+
+            # if embedding_str == "X_pca":
+            #     print(adata.obsm[embd_ngb])
+            #     print(adata.obsm[pre_ngb])
+            #     print(np.linalg.norm(adata.obsm[embd_ngb] - adata.obsm[pre_ngb]))
+            #     print(adata.obsm[embd_dist])
+            #     print(adata.obsm[pre_dist])
+            #     print(np.linalg.norm(adata.obsm[embd_dist] - adata.obsm[pre_dist]))
+            #     exit()
 
     #=================================
     def correlation_function(self,
@@ -551,7 +607,7 @@ class scDEED:
                     embd_sort_dist_mtx,
                     pre_ngb_mtx)
 
-            with Pool(processes=6) as pool:
+            with Pool(processes=10) as pool:
                 C = pool.starmap(self.correlation_function,
                                 Z)
 
@@ -564,7 +620,7 @@ class scDEED:
     #=================================
     def plot_distribution_for_anndata(self,
                                       adata: sc.AnnData,
-                                      fig_format: Optional[str] = "png",
+                                      fig_format: Optional[str] = "pdf",
         ):
         for embedding_type in self.list_of_embeddings:
             corr_tag = f"{embedding_type}_correlations"
@@ -658,6 +714,66 @@ class scDEED:
                                 set_legend_outside=True)
 
 
+    #=================================
+    def compute_distortion(self,
+                           adata: sc.AnnData,
+                           original_dist_label: str,
+                           special_tag: Optional[str] = "",
+        ):
+
+        n_cells = adata.X.shape[0]
+        original_dist_mtx = adata.obsm[original_dist_label]
+
+        for embedding_type in self.list_of_embeddings:
+
+            embd_dist = f"{embedding_type}_distances"
+            embd_dist_mtx  = adata.obsm[embd_dist]
+            expansion   = 0
+            contraction = 0
+            distortion  = 0
+
+            eps = 1e-8
+
+            for i in range(n_cells-1):
+                for j in range(i+1, n_cells):
+
+                    out_dist = embd_dist_mtx[i,j]
+                    in_dist  = original_dist_mtx[i,j]
+
+                    if out_dist < eps:
+                        print("Output distance below threshold.")
+                        continue
+                    if in_dist < eps:
+                        print("Input distance below threshold.")
+                        continue
+
+                    out_to_in = out_dist / in_dist
+                    in_to_out = 1 / out_to_in
+
+                    if expansion < out_to_in:
+                        expansion = out_to_in
+                    if contraction < in_to_out:
+                        contraction = in_to_out
+
+            distortion = expansion * contraction
+
+            embd_expansion = f"{embedding_type}_expansion"
+            embd_expansion += special_tag
+
+            embd_contraction = f"{embedding_type}_contraction"
+            embd_contraction += special_tag
+
+            embd_distortion = f"{embedding_type}_distortion"
+            embd_distortion += special_tag
+
+
+
+            adata.uns[embd_expansion] = expansion
+            adata.uns[embd_contraction] = contraction
+            adata.uns[embd_distortion] = distortion
+
+
+
 
     #=================================
     def run(self):
@@ -669,11 +785,30 @@ class scDEED:
         self.compute_spaces_for_anndata(self.A)
         self.compute_spaces_for_anndata(self.B)
 
-        self.plot_spaces_for_anndata(self.A)
-        self.plot_spaces_for_anndata(self.B)
-
         self.compute_proximity_objects_for_anndata(self.A)
         self.compute_proximity_objects_for_anndata(self.B)
+
+        # self.compute_distortion(self.A,
+        #                         original_dist_label = "pre_dist",
+        #                         special_tag="",
+        # )
+
+        self.compute_manifold_neighbor_matrix(self.A)
+
+        dist_mtx = "manifold_distance_matrix"
+        # tag = "_manifold"
+
+        # dist_mtx = "pre_distances"
+        tag = ""
+
+        self.compute_distortion(
+            self.A,
+            original_dist_label = dist_mtx,
+            special_tag=tag,
+        )
+
+        self.plot_spaces_for_anndata(self.A)
+        self.plot_spaces_for_anndata(self.B)
 
         self.compute_correlations_for_anndata(self.A)
         self.compute_correlations_for_anndata(self.B)
@@ -681,20 +816,54 @@ class scDEED:
         self.plot_distribution_for_anndata(self.A)
         self.plot_distribution_for_anndata(self.B)
 
+
         self.determine_percentiles_for_anndata(self.B)
         self.classify_cells(self.A, null_dist_adata = self.B)
 
         if self.using_1D_ordered_manifold:
-            self.compute_manifold_neighbor_matrix(self.A)
+            # self.compute_manifold_neighbor_matrix(self.A)
             self.compute_correlations_for_anndata(
                 self.A,
                 pre_ngb_label="manifold_neighbor_matrix",
                 special_tag = "_manifold"
                 )
+
             self.classify_cells(self.A,
                                 null_dist_adata = self.B,
                                 special_tag="_manifold")
 
+# def t_wrangler(
+#     input: sc.AnnData | str,
+#     output: Optional[str] = None,
+#     **kwargs
+#     ) -> sc.AnnData:
+#     """
+#     """
+#     adata = common.read_anndata(input)
+#     main_title = adata.uns["main_title"]
+#     iteration  = adata.uns["iteration"]
+
+#     fname = "iteration.csv"
+#     fname = os.path.join(output, fname)
+#     it = np.array([iteration])
+#     np.savetxt(fname, it, fmt="%d")
+
+#     obj = scDEED(input = adata,
+#                  output = output,
+#                  main_title = main_title,
+#                  using_1D_ordered_manifold = True,
+#                  )
+#     obj.run()
+
+
+# def main() -> None:
+#     fire.Fire({
+#         't_wrangler': t_wrangler,
+#     })
+
+
+# if __name__ == "__main__":
+#    main()
 
 
 
